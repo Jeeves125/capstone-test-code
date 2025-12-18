@@ -24,7 +24,7 @@ def manual_drive(): #You will use this function to program your ESC if required
     print("You have selected manual option so give a value between 0 and you max value")    
     while True:
         inp = raw_input()
-        if inp == "stop":
+		if inp == "stop":
             stop()
             break
 		elif inp == "control":
