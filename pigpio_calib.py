@@ -1,16 +1,25 @@
 import pigpio
 import time
 
-ESC = 17
 pi = pigpio.pi()
 
-# Neutral (arming)
-pi.set_servo_pulsewidth(ESC, 1500)
-time.sleep(3)
+PWM_PIN = 18
 
-# Small forward
-pi.set_servo_pulsewidth(ESC, 1600)
+STOP = 1500
+FORWARD = 1700
+REVERSE = 1300
+
+pi.set_servo_pulsewidth(PWM_PIN, STOP)
 time.sleep(2)
 
-# Back to neutral
-pi.set_servo_pulsewidth(ESC, 1500)
+pi.set_servo_pulsewidth(PWM_PIN, FORWARD)
+time.sleep(3)
+
+pi.set_servo_pulsewidth(PWM_PIN, STOP)
+time.sleep(1)
+
+pi.set_servo_pulsewidth(PWM_PIN, REVERSE)
+time.sleep(3)
+
+pi.set_servo_pulsewidth(PWM_PIN, STOP)
+pi.stop()
