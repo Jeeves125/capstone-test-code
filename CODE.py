@@ -35,6 +35,7 @@ while True:
     ''' Handle input '''
     # Input.process_events(events)
     left_y = joystick.get_axis(1)  # Get the Y-axis value of the left stickq
+    print(f"Left Stick Y: {left_y:.2f} : Pulse Width: {1500 + (500 * left_y):.2f}")
     # action_value = Input.get_action_held('move')
     forward_value = 1500 + (500 * left_y)
     
