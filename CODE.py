@@ -4,6 +4,9 @@ import pigpio
 import time
 # from engine import InputManager as Input, Float2
 
+pygame.init()
+screen = pygame.display.set_mode((640, 480))
+
 # The { Input.OPTION_CONTROLLER: 0 } option specifies that these inputs are for controller 0 (NOT required, just an example of using options for controller-specific mappings)
 # Input.add_mapping('move', Float2(0,0), normalized=Input.NORM_REGULAR)
 # Input.add_mapping_input('move', Input.J_LEFT_Y, Input.JOY_AXIS, Float2(0, -1), { Input.OPTION_CONTROLLER: 0 })
