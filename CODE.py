@@ -2,7 +2,6 @@ import pygame
 from pygame.locals import *
 import pigpio
 import time
-import engine
 from engine import InputManager as Input, Float2
 
 # The { Input.OPTION_CONTROLLER: 0 } option specifies that these inputs are for controller 0 (NOT required, just an example of using options for controller-specific mappings)
@@ -16,8 +15,6 @@ pi.set_servo_pulsewidth(14, 1500)  # Set initial pulse width to stop the motor
 time.sleep(2)
 
 while True:
-    dt = engine.CLOCK.tick(60) / 1000.0  # delta time
-    
     events = pygame.event.get()
     for event in events:
         if event.type == pygame.QUIT:
@@ -31,6 +28,3 @@ while True:
     forward_value = 1500 + (500 * action_value.y)
     
     pi.set_servo_pulsewidth(14, forward_value)
-
-    ''' End frame '''
-    engine.CLOCK.tick()
