@@ -1,5 +1,7 @@
 import pygame
 from pygame.locals import *
+import pigpio
+import time
 import engine
 from engine import InputManager as Input, Float2
 
@@ -7,6 +9,11 @@ from engine import InputManager as Input, Float2
 Input.add_mapping('move', Float2(0,0), normalized=Input.NORM_REGULAR)
 Input.add_mapping_input('move', Input.J_LEFT_Y, Input.JOY_AXIS, Float2(0, -1), { Input.OPTION_CONTROLLER: 0 })
 Input.add_mapping_input('move', Input.J_LEFT_X, Input.JOY_AXIS, Float2(1, 0))
+
+pi = pigpio.pi()
+pi.set_mode(14, pigpio.OUTPUT)
+pi.set_servo_pulsewidth(14, 1500)  # Set initial pulse width to stop the motor
+time.sleep(2)
 
 while True:
     dt = engine.CLOCK.tick(60) / 1000.0  # delta time
@@ -23,6 +30,7 @@ while True:
     action_value = Input.get_action_held('move')
     forward_value = 1500 + (500 * action_value.y)
     
+    pi.set_servo_pulsewidth(14, forward_value)
 
     ''' End frame '''
     engine.CLOCK.tick()
