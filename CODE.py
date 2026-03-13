@@ -5,7 +5,14 @@ import time
 # from engine import InputManager as Input, Float2
 
 pygame.init()
+pygame.joystick.init()
 screen = pygame.display.set_mode((640, 480))
+clock = pygame.time.Clock()
+
+joystick = pygame.joystick.Joystick(0)
+joystick.init()
+
+print(f"Joystick Name: {joystick.get_name()}")
 
 # The { Input.OPTION_CONTROLLER: 0 } option specifies that these inputs are for controller 0 (NOT required, just an example of using options for controller-specific mappings)
 # Input.add_mapping('move', Float2(0,0), normalized=Input.NORM_REGULAR)
@@ -23,11 +30,13 @@ while True:
         if event.type == pygame.QUIT:
             pygame.quit()
             exit()
+              
     
     ''' Handle input '''
     # Input.process_events(events)
-
+    left_y = joystick.get_axis(1)  # Get the Y-axis value of the left stickq
     # action_value = Input.get_action_held('move')
-    forward_value = 1500 + 200 # (500 * action_value.y)
+    forward_value = 1500 + (500 * left_y)
     
     pi.set_servo_pulsewidth(14, forward_value)
+    clock.tick(60)
