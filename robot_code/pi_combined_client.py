@@ -145,7 +145,26 @@ def start_hud():
       if event.type == pygame.QUIT:
         pygame.quit()
         full_exit()
-        
+      if event.type == pygame.KEYDOWN:
+        if event.key == pygame.K_SEMICOLON:
+          client.send("LOGS".encode())
+          log_bytes = int(client.recv(1024).decode())  # Wait for acknowledgment
+          log_data = client.recv(log_bytes).decode()  # Receive the actual log data
+          with open("server.log", "w") as f:
+            f.write(log_data)
+            
+        if event.key == pygame.K_l:
+          client.send("CLEAR_LOGS".encode())
+          
+        if event.key == pygame.K_1:
+          client.send("LOW_FWD".encode())
+        if event.key == pygame.K_2:
+          client.send("HIGH_FWD".encode())
+        if event.key == pygame.K_3:
+          client.send("LOW_BWD".encode())
+        if event.key == pygame.K_4:
+          client.send("HIGH_BWD".encode())
+          
       ''' Handle input '''
       keys = pygame.key.get_pressed()
       a = int(keys[pygame.K_a])

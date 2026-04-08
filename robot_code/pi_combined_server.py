@@ -70,15 +70,40 @@ def main_server():
     # Placeholder for command processing logic
     print_info("Processing command: {}".format(command))
     
-    if command == "LOW":
+    if command == "LOW_FWD":
       #os.system(f"gpio pwm {PWM_PIN} {pulse_width_microseconds}")
       os.system(f"gpio pwm {PWM_PIN} {17}")
       time.sleep(1)
       os.system(f"gpio pwm {PWM_PIN} {15}")
     
+    if command == "HIGH_FWD":
+      os.system(f"gpio pwm {PWM_PIN} {19}")
+      time.sleep(1)
+      os.system(f"gpio pwm {PWM_PIN} {15}")
+      
+    if command == "LOW_BWD":
+      os.system(f"gpio pwm {PWM_PIN} {13}")
+      time.sleep(1)
+      os.system(f"gpio pwm {PWM_PIN} {15}")
+      
+    if command == "HIGH_BWD":
+      os.system(f"gpio pwm {PWM_PIN} {11}")
+      time.sleep(1)
+      os.system(f"gpio pwm {PWM_PIN} {15}")
+    
     if command == "LOGS":
-      # Placeholder for logs command logic
-      pass
+      logs = get_logs()
+      log_bytes = logs.encode()
+      client_socket.send(str(len(log_bytes)).encode())  # Send the length of the log data first
+      client_socket.send(logs.encode())
+    
+    if command == "CLEAR_LOGS":
+      log_file.close()
+      os.remove("server.log")
+      log_file = open("server.log", 'a')
+      sys.stdout = log_file
+      sys.stderr = log_file
+      print_info("Logs cleared by command.")
     
 
   print_info("Server is listening on port 5000...")
