@@ -1,35 +1,46 @@
-import cv2
-import sys
+from picamera2 import Picamera2
+import subprocess
+import socket
 
-# RUN THIS FROM THE COMPUTER
-# This runs a server listening for the PI's video stream.
-# Uses h264 encoding and GStreamer to receive the video feed from the PI and display it using OpenCV.
+# RUN THIS FROM THE ORANGE PI.
+# This is the camera server: it captures camera frames and sends them to the client.
+# Pipeline settings are kept the same to preserve transmission efficiency.
 
-pipeline = (
-"udpsrc port=5000 buffer-size=65536 ! "
-"application/x-rtp, encoding-name=H264, payload=96 ! "
-"rtph264depay ! "
-"avdec_h264 ! " # Replace with nvh264dec for Linux NVIDIA GPU decoding, or vaapih264dec for Linux Intel GPU decoding
-"videoconvert ! "
-"appsink sync=false max-buffers=1 drop=true"
+STREAM_PORT = 5000
+CONTROL_PORT = 5001
+
+print(f"Waiting for camera client registration on UDP {CONTROL_PORT}...")
+
+control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+control_sock.bind(("", CONTROL_PORT))
+_, (client_host, _) = control_sock.recvfrom(1024)
+control_sock.close()
+
+print(f"Client registered from {client_host}. Starting stream...")
+
+pipeline = [
+    "gst-launch-1.0",
+    "fdsrc",
+    "!",
+    "h264parse",
+    "config-interval=1",
+    "!",
+    "rtph264pay",
+    "pt=96",
+    "!",
+    f"udpsink host={client_host} port={STREAM_PORT} sync=false"
+]
+
+gst = subprocess.Popen(pipeline, stdin=subprocess.PIPE)
+
+picam2 = Picamera2()
+
+config = picam2.create_video_configuration(
+    main={"size": (1280, 720)},
+    controls={"FrameRate": 30}
 )
 
-cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+picam2.configure(config)
+picam2.start()
 
-if not cap.isOpened():
-    print("Failed to open GStreamer UDP pipeline on this machine.")
-    print("Install OpenCV with GStreamer support and verify GStreamer is installed.")
-    sys.exit(1)
-
-while True:
-
-    ret, frame = cap.read()
-    if not ret:
-        continue
-
-    # result = my_algorithm(frame)
-
-    cv2.imshow("video", frame)
-
-    if cv2.waitKey(1) == 27:
-        break
+picam2.start_recording("h264", gst.stdin)

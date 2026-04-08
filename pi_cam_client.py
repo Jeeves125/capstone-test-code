@@ -1,36 +1,45 @@
-from picamera2 import Picamera2
-import subprocess
+import cv2
+import sys
+import socket
 
-# RUN THIS FROM THE PI.
-# It should connect to the server running on the other computer connected to the PI's wifi access point.
-# Then, using h264 encoding, it will stream the video feed from the camera to the server using GStreamer.
+# RUN THIS FROM THE COMPUTER.
+# This is the camera client: it receives the Orange Pi camera stream over UDP.
+# Pipeline settings are kept the same to preserve transmission efficiency.
 
-HOST = "192.168.4.2"
-PORT = 5000
+SERVER_HOST = "192.168.4.1"
+STREAM_PORT = 5000
+CONTROL_PORT = 5001
 
-pipeline = [
-    "gst-launch-1.0",
-    "fdsrc",
-    "!",
-    "h264parse",
-    "config-interval=1",
-    "!",
-    "rtph264pay",
-    "pt=96",
-    "!",
-    f"udpsink host={HOST} port={PORT} sync=false"
-]
-
-gst = subprocess.Popen(pipeline, stdin=subprocess.PIPE)
-
-picam2 = Picamera2()
-
-config = picam2.create_video_configuration(
-    main={"size": (1280,720)},
-    controls={"FrameRate":30}
+pipeline = (
+f"udpsrc port={STREAM_PORT} buffer-size=65536 ! "
+"application/x-rtp, encoding-name=H264, payload=96 ! "
+"rtph264depay ! "
+"avdec_h264 ! "  # Replace with nvh264dec for Linux NVIDIA GPU decoding, or vaapih264dec for Linux Intel GPU decoding
+"videoconvert ! "
+"appsink sync=false max-buffers=1 drop=true"
 )
 
-picam2.configure(config)
-picam2.start()
+cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 
-picam2.start_recording("h264", gst.stdin)
+if not cap.isOpened():
+    print("Failed to open GStreamer UDP pipeline on this machine.")
+    print("Install OpenCV with GStreamer support and verify GStreamer is installed.")
+    sys.exit(1)
+
+# Lightweight registration so the server learns where to send the stream.
+control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for _ in range(3):
+    control_sock.sendto(b"camera_client_ready", (SERVER_HOST, CONTROL_PORT))
+control_sock.close()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        continue
+
+    # result = my_algorithm(frame)
+
+    cv2.imshow("video", frame)
+
+    if cv2.waitKey(1) == 27:
+        break
