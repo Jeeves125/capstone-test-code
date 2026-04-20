@@ -1,39 +1,35 @@
 # from picamera2 import Picamera2
+from periphery import GPIO, PWM
 from datetime import datetime
 import socket, threading, sys, os, time
 
-"""
-git clone https://github.com/orangepi-xunlong/wiringOP.git
-cd wiringOP
-chmod +x build
-sudo ./build
-
-gpio readall
-"""
-PWM_PIN = 14
-os.system(f"gpio mode {PWM_PIN} pwm")
-
 stop_event = threading.Event()
 client_socket, client_address = None, None
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(BASE_DIR, "server.log")
+
 original_stdout = sys.stdout
-log_file = open("server.log", 'a')
+log_file = open(LOG_PATH, 'a', buffering=1)
 sys.stdout = log_file
 sys.stderr = log_file
-print(f" PI SERVER LOG {datetime.now()} ".center(70, "="))
+print(flush=True)
+print(f" PI SERVER LOG {datetime.now()} ".center(70, "="), flush=True)
+print(flush=True)
 
 def print_info(log):
-  print("[INFO] {}".format(log))
+  print("[INFO] {}".format(log), flush=True)
   
 def print_warn(warn):
-  print("[WARN] {}".format(warn))
+  print("[WARN] {}".format(warn), flush=True)
   
 def print_error(error):
-  print("[*ERROR*] {}".format(error))
+  print("[*ERROR*] {}".format(error), flush=True)
   
 def get_logs():
   log_file.flush()
   logs = ""
-  with open("server.log", 'r') as f:
+  with open(LOG_PATH, 'r') as f:
     logs = f.read()
   return logs
 
@@ -43,7 +39,50 @@ def full_exit():
   if not log_file.closed:
     log_file.close()
   stop_event.set()
+  stop_gpio_pwm()
   sys.exit(0)
+
+""" PWM using GPIO toggling (50 hz, 1000-2000 microsecond pulse width) """
+PIN = GPIO(54, "out")  # GPIO number for PWM15
+PWM_FREQ = 50  # 50 Hz
+PWM_PERIOD = 1.0 / PWM_FREQ
+pulse_width = 1500  # Neutral pulse width in microseconds
+duration_start_time = 0
+
+def start_gpio_pwm(duration=5):
+  global duration_start_time, pulse_width
+  try:
+    duration_start_time = time.monotonic()
+    start_time = time.monotonic()
+    next_pulse = start_time
+    while True:
+      duty = pulse_width / 1_000_000  # Convert microseconds to seconds
+      
+      now = time.monotonic()
+      if now < next_pulse:
+        time.sleep(next_pulse - now)
+
+      PIN.write(True)
+      pulse_start = time.monotonic()
+      while time.monotonic() - pulse_start < duty:
+        pass  # busy wait for more precise high pulse
+      PIN.write(False)
+
+      next_pulse += PWM_PERIOD
+      
+      # If I want to only have it last a certain amount of time.
+      if pulse_width != 1500 and duration and (now - duration_start_time) >= duration:
+        print_warn("Stopped motor due to inactivity")
+        pulse_width = 1500
+  except Exception as e:
+    print_error(f"Error in PWM thread: {e}")
+    full_exit()
+
+def stop_gpio_pwm():
+  global pulse_width
+  pulse_width = 1500  # Reset to neutral
+  PIN.write(False)
+  PIN.close()
   
 # print_info("Server starting up...")
 # print_warn("This is a test warning message.")
@@ -51,7 +90,7 @@ def full_exit():
 # full_exit()
 
 def main_server():
-  global client_socket, client_address
+  global client_socket, client_address, pulse_width, duration_start_time
   server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   print_info("Starting server...")
   server.bind(('0.0.0.0', 5000))
@@ -62,34 +101,55 @@ def main_server():
     stop_event.clear()
     print_info("Waiting for a controller to connect...")
     client_socket, client_address = server.accept()
+    
+    
+    threading.Thread(target=start_gpio_pwm).start()
     # threading.Thread(target=run_camera_server, args=(client_socket, client_address, stop_event)).start()
     
   def process_command(command):
-    global client_socket, client_address
+    global client_socket, client_address, pulse_width, log_file, duration_start_time
+    
+    if command == "":
+      print_warn("Received empty command, ignoring.")
+      return
     
     # Placeholder for command processing logic
     print_info("Processing command: {}".format(command))
     
+    if command == "STOP":
+      pulse_width = 1500  # Neutral pulse width to stop the motor
+    
+    if command.startswith("PWM"):
+      command = command.replace("PWM", "")
+      try:
+        pwm_command_value = int(command)
+        
+        if pwm_command_value < 1000 or pwm_command_value > 2000:
+          print_error("PWM value out of range (1000-2000), ignoring command.")
+          return
+        
+        if pwm_command_value != pulse_width:
+          duration_start_time = time.monotonic()  # Reset duration timer on new command
+        
+        pulse_width = pwm_command_value
+      except ValueError:
+        print_error("Invalid PWM value.")
+    
     if command == "LOW_FWD":
-      #os.system(f"gpio pwm {PWM_PIN} {pulse_width_microseconds}")
-      os.system(f"gpio pwm {PWM_PIN} {17}")
-      time.sleep(1)
-      os.system(f"gpio pwm {PWM_PIN} {15}")
+      pulse_width = 1700
+      duration_start_time = time.monotonic()  # Reset duration timer on stop command
     
     if command == "HIGH_FWD":
-      os.system(f"gpio pwm {PWM_PIN} {19}")
-      time.sleep(1)
-      os.system(f"gpio pwm {PWM_PIN} {15}")
+      pulse_width = 1900
+      duration_start_time = time.monotonic()  # Reset duration timer on stop command
       
     if command == "LOW_BWD":
-      os.system(f"gpio pwm {PWM_PIN} {13}")
-      time.sleep(1)
-      os.system(f"gpio pwm {PWM_PIN} {15}")
+      pulse_width = 1300
+      duration_start_time = time.monotonic()  # Reset duration timer on stop command
       
     if command == "HIGH_BWD":
-      os.system(f"gpio pwm {PWM_PIN} {11}")
-      time.sleep(1)
-      os.system(f"gpio pwm {PWM_PIN} {15}")
+      pulse_width = 1100
+      duration_start_time = time.monotonic()  # Reset duration timer on stop command
     
     if command == "LOGS":
       logs = get_logs()
@@ -99,8 +159,8 @@ def main_server():
     
     if command == "CLEAR_LOGS":
       log_file.close()
-      os.remove("server.log")
-      log_file = open("server.log", 'a')
+      os.remove(LOG_PATH)
+      log_file = open(LOG_PATH, 'a', buffering=1)
       sys.stdout = log_file
       sys.stderr = log_file
       print_info("Logs cleared by command.")
@@ -113,7 +173,20 @@ def main_server():
       continue
     
     try:
-      command = client_socket.recv(1024).decode()      
+      data = client_socket.recv(1024)
+      if not data:
+        print_warn("Client disconnected.")
+        log_file.flush()
+        client_socket.close()
+        client_socket, client_address = None, None
+        continue
+
+      command = data.decode().strip()
+      if not command:
+        print_warn("No command sent, ignoring.")
+        log_file.flush()
+        continue
+
       print_info("Received command from {}:{}".format(client_address[0], client_address[1]))
       process_command(command)
       

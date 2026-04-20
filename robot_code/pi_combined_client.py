@@ -5,7 +5,7 @@ import cv2
 
 USER = "robot"
 PASSWORD = "robot"
-HOST = "192.168.10.76"
+HOST = "192.168.10.86"
 MAIN_PORT = 5000
 STREAM_PORT = 5001
 client: socket.socket = None
@@ -36,24 +36,27 @@ def main_client(retry_count=0):
   # Open the secure file transfer.
   sftp = ssh.open_sftp()
   sftp.put(os.path.join(os.getcwd(), "robot_code", "pi_combined_server.py"), 'pi_combined_server.py')
+  # sftp.put(os.path.join(os.getcwd(), "robot_code", "test_code.py"), 'test_code.py')
+  # sftp.get('server.log', os.path.join(os.getcwd(), "robot_code", "server.log"))
+  # print("Fetched server logs from robot")
   sftp.close()
 
   # Find and KILLL the existing server process, then start a new one.
-  stdin, stdout, stderr = ssh.exec_command("lsof -ti :5000")
+  stdin, stdout, stderr = ssh.exec_command("sudo lsof -ti :5000")
   pids = stdout.read().decode().strip().splitlines()
 
   for pid in pids:
     print(f"Killed server running at :5000, PID: {pid}")
-    ssh.exec_command(f"kill -9 {pid}")
+    ssh.exec_command(f"sudo kill -9 {pid}")
   
   # ONLY USE FOR DEBUGGING
-  stdin, stdout, stderr = ssh.exec_command("python3 pi_combined_server.py")
-  print(stdout.read().decode())
-  print(stderr.read().decode())
+  # stdin, stdout, stderr = ssh.exec_command("python3 pi_combined_server.py")
+  # print(stdout.read().decode())
+  # print(stderr.read().decode())
   
   # Start the new server in the BACKGROUND, redirecting output to a log file.
-  # stdin, stdout, stderr = ssh.exec_command("nohup python3 pi_combined_server.py > server.log 2>&1 &")
-  # print("Server started in the background.")
+  stdin, stdout, stderr = ssh.exec_command("nohup sudo python3 pi_combined_server.py > server.log 2>&1 &")
+  print("Server started in the background.")
   ssh.close()
 
   """ 
@@ -63,11 +66,11 @@ def main_client(retry_count=0):
   def connect_to_server():
     try:
       client.connect((HOST, MAIN_PORT))
+      print("Connected to robot.")
       # cam_client_thread = threading.Thread(target=run_camera_client, args=(stop_event,))
       # cam_client_thread.start()
       start_hud()
       
-      print("Connected to robot.")
     except Exception as e:
       print("Failed to connect to robot: {}".format(e))
       return False
@@ -108,31 +111,34 @@ def run_camera_client(stop_event):
       print("Error reading video frame: {}".format(e))
       full_exit()
 
+PWM_PIN = 14
+wanted_pulse_width = 1500  # Neutral pulse width for ESC (Electronic Speed Controller)
+pulse_width = 1500  # Neutral pulse width for ESC (Electronic Speed Controller)
+
+_pulse_width = 1500  # Actual pulse width variable that will be updated smoothly and safely
+_max_delta = 50  # Maximum change in pulse width per frame to ensure smooth acceleration/deceleration
+
 def start_hud():
+  global _pulse_width, _max_delta, pulse_width, wanted_pulse_width
   pygame.init()
   
   def lerp(a, b, t): 
       return a + (b - a) * t
 
-  PWM_PIN = 14
-  wanted_pulse_width = 1500  # Neutral pulse width for ESC (Electronic Speed Controller)
-  pulse_width = 1500  # Neutral pulse width for ESC (Electronic Speed Controller)
-
-  _pulse_width = 1500  # Actual pulse width variable that will be updated smoothly and safely
-  _max_delta = 50  # Maximum change in pulse width per frame to ensure smooth acceleration/deceleration
-  def safe_set_motor_speed(pw):
+  def get_safe_motor_speed(pw):
     global _pulse_width
     delta = pw - _pulse_width
     
     if (delta > 0 and _pulse_width < 1500) or (delta < 0 and _pulse_width > 1500):
         _pulse_width = 1500  # Snap to the neutral point if crossing it
-        return  # Do not update pulse width if it's already at the boundary
+        return 1500
     if (delta > 0 and _pulse_width >= 1500) or (delta < 0 and _pulse_width <= 1500):
         sign_delta = 1 if delta > 0 else -1
         delta = min(abs(delta), _max_delta) * sign_delta  # Limit the delta to max_delta while preserving the sign
         _pulse_width += delta
         
-    print(f"Pulse Width: {_pulse_width:.2f}")
+    # print(f"Pulse Width: {_pulse_width:.2f}")
+    return _pulse_width
     
     # pi.set_servo_pulsewidth(PWM_PIN, pulse_width)
   
@@ -141,7 +147,7 @@ def start_hud():
   
   while True:
     for event in pygame.event.get():
-      delta = CLOCK.tick(60)
+      delta = CLOCK.tick(10)
       if event.type == pygame.QUIT:
         pygame.quit()
         full_exit()
@@ -150,12 +156,14 @@ def start_hud():
           client.send("LOGS".encode())
           log_bytes = int(client.recv(1024).decode())  # Wait for acknowledgment
           log_data = client.recv(log_bytes).decode()  # Receive the actual log data
-          with open("server.log", "w") as f:
+          with open(os.path.join(os.getcwd(), "robot_code", "server.log"), "w") as f:
             f.write(log_data)
             
         if event.key == pygame.K_l:
           client.send("CLEAR_LOGS".encode())
           
+        if event.key == pygame.K_0:
+          client.send("STOP".encode())
         if event.key == pygame.K_1:
           client.send("LOW_FWD".encode())
         if event.key == pygame.K_2:
@@ -165,7 +173,7 @@ def start_hud():
         if event.key == pygame.K_4:
           client.send("HIGH_BWD".encode())
           
-      ''' Handle input '''
+      # ''' Handle input '''
       keys = pygame.key.get_pressed()
       a = int(keys[pygame.K_a])
       d = int(keys[pygame.K_d])
@@ -175,8 +183,8 @@ def start_hud():
       
       wanted_pulse_width = 1500 + (-500 * left_y)
       pulse_width = lerp(pulse_width, wanted_pulse_width, 0.1)  # Smoothly interpolate towards the target pulse width
-      
-      safe_set_motor_speed(pulse_width)
+      print(1500 + (-200 * (-a + d)))
+      client.send(("PWM" + str(1500 + (-200 * (-a + d)))).encode())
         
       SCREEN.fill((200, 50, 50))
       pygame.display.update()
