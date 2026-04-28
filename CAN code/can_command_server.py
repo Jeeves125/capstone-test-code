@@ -20,13 +20,19 @@ Commands:
 from __future__ import annotations
 
 import argparse
-import importlib
 import logging
 import socketserver
 import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+try:
+    from phoenix5 import ControlMode, WPI_VictorSPX
+except ImportError as exc:
+    raise RuntimeError(
+        "Missing dependency 'phoenix5'. Install robotpy-ctre in the active environment."
+    ) from exc
 
 
 def clamp(value: float, minimum: float, maximum: float) -> float:
@@ -57,45 +63,12 @@ class VictorSPXDriver(MotorDriver):
 
     def __init__(self, can_id: int) -> None:
         self.can_id = can_id
-        self._motor = None
-        self._control_mode = None
-        self._initialize_driver()
-
-    def _initialize_driver(self) -> None:
-        try:
-            ctre = importlib.import_module("ctre")
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "Missing dependency 'ctre'. Install RobotPy CTRE (pip install robotpy-ctre)."
-            ) from exc
-
-        motor_class = getattr(ctre, "WPI_VictorSPX", None) or getattr(ctre, "VictorSPX", None)
-        if motor_class is None:
-            raise RuntimeError("ctre module found, but VictorSPX class is unavailable.")
-
-        control_mode = getattr(ctre, "ControlMode", None)
-        if control_mode is None:
-            try:
-                ctre_internal = importlib.import_module("ctre._ctre")
-                control_mode = getattr(ctre_internal, "ControlMode", None)
-            except ModuleNotFoundError:
-                control_mode = None
-
-        self._motor = motor_class(self.can_id)
-        self._control_mode = control_mode
+        self._motor = WPI_VictorSPX(self.can_id)
         logging.info("Victor SPX initialized on CAN ID %s", self.can_id)
 
     def set_percent_output(self, value: float) -> None:
         value = clamp(value, -1.0, 1.0)
-
-        if self._control_mode is not None:
-            percent_output = getattr(self._control_mode, "PercentOutput", None)
-            if percent_output is not None:
-                self._motor.set(percent_output, value)
-                return
-
-        # Fallback for wrappers exposing SpeedController-style set(value)
-        self._motor.set(value)
+        self._motor.set(ControlMode.PercentOutput, value)
 
 
 @dataclass

@@ -16,6 +16,8 @@ Install RobotPy CTRE on the target robot controller environment:
 
 pip install robotpy-ctre
 
+This project uses the Phoenix 5 API exposed through the phoenix5 package.
+
 If you only want to test networking and parsing without hardware:
 
 python can_command_server.py --simulate
