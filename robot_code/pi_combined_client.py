@@ -5,7 +5,7 @@ import cv2
 
 USER = "robot"
 PASSWORD = "robot"
-HOST = "192.168.10.86"
+HOST = "192.168.10.69"
 MAIN_PORT = 5000
 STREAM_PORT = 5001
 client: socket.socket = None
@@ -37,7 +37,7 @@ def main_client(retry_count=0):
   sftp = ssh.open_sftp()
   sftp.put(os.path.join(os.getcwd(), "robot_code", "pi_combined_server.py"), 'pi_combined_server.py')
   # sftp.put(os.path.join(os.getcwd(), "robot_code", "test_code.py"), 'test_code.py')
-  # sftp.get('server.log', os.path.join(os.getcwd(), "robot_code", "server.log"))
+  sftp.get('server.log', os.path.join(os.getcwd(), "robot_code", "server.log"))
   # print("Fetched server logs from robot")
   sftp.close()
 
@@ -55,7 +55,7 @@ def main_client(retry_count=0):
   # print(stderr.read().decode())
   
   # Start the new server in the BACKGROUND, redirecting output to a log file.
-  stdin, stdout, stderr = ssh.exec_command("nohup sudo python3 pi_combined_server.py > server.log 2>&1 &")
+  stdin, stdout, stderr = ssh.exec_command("nohup sudo python3 pi_combined_server.py")
   print("Server started in the background.")
   ssh.close()
 
@@ -144,49 +144,51 @@ def start_hud():
   
   CLOCK = pygame.time.Clock()
   SCREEN = pygame.display.set_mode((800, 800))
+  FONT = pygame.font.SysFont("Arial", 24)
   
   while True:
+    delta = CLOCK.tick(10)
     for event in pygame.event.get():
-      delta = CLOCK.tick(10)
       if event.type == pygame.QUIT:
         pygame.quit()
         full_exit()
       if event.type == pygame.KEYDOWN:
         if event.key == pygame.K_SEMICOLON:
-          client.send("LOGS".encode())
+          client.send("LOGS\n".encode())
           log_bytes = int(client.recv(1024).decode())  # Wait for acknowledgment
           log_data = client.recv(log_bytes).decode()  # Receive the actual log data
           with open(os.path.join(os.getcwd(), "robot_code", "server.log"), "w") as f:
             f.write(log_data)
             
         if event.key == pygame.K_l:
-          client.send("CLEAR_LOGS".encode())
+          client.send("CLEAR_LOGS\n".encode())
           
         if event.key == pygame.K_0:
-          client.send("STOP".encode())
+          client.send("STOP\n".encode())
         if event.key == pygame.K_1:
-          client.send("LOW_FWD".encode())
+          client.send("LOW_FWD\n".encode())
         if event.key == pygame.K_2:
-          client.send("HIGH_FWD".encode())
+          client.send("HIGH_FWD\n".encode())
         if event.key == pygame.K_3:
-          client.send("LOW_BWD".encode())
+          client.send("LOW_BWD\n".encode())
         if event.key == pygame.K_4:
-          client.send("HIGH_BWD".encode())
-          
-      # ''' Handle input '''
+          client.send("HIGH_BWD\n".encode())
+
+      # Handle continuous key state every frame so neutral is always transmitted.
       keys = pygame.key.get_pressed()
       a = int(keys[pygame.K_a])
       d = int(keys[pygame.K_d])
       left_y = -a + d
-      
-      # action_value = Input.get_action_held('move')
-      
+
       wanted_pulse_width = 1500 + (-500 * left_y)
-      pulse_width = lerp(pulse_width, wanted_pulse_width, 0.1)  # Smoothly interpolate towards the target pulse width
-      print(1500 + (-200 * (-a + d)))
-      client.send(("PWM" + str(1500 + (-200 * (-a + d)))).encode())
-        
+      pulse_width = lerp(pulse_width, wanted_pulse_width, 1)  # Smoothly interpolate towards the target pulse width
+
+      pulse_width_text = FONT.render(f"Pulse Width: {pulse_width:.2f}", True, (255, 255, 255))
+      client.send(("PWM" + str(int(pulse_width)) + "\n").encode())
+
       SCREEN.fill((200, 50, 50))
+      SCREEN.blit(pulse_width_text, (20, 20))
+
       pygame.display.update()
 
 retrys = 0

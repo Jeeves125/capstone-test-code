@@ -44,6 +44,7 @@ def full_exit():
 
 """ PWM using GPIO toggling (50 hz, 1000-2000 microsecond pulse width) """
 PIN = GPIO(54, "out")  # GPIO number for PWM15
+PIN2 = GPIO(35, "out")  # GPIO number for PWM15
 PWM_FREQ = 50  # 50 Hz
 PWM_PERIOD = 1.0 / PWM_FREQ
 pulse_width = 1500  # Neutral pulse width in microseconds
@@ -63,10 +64,12 @@ def start_gpio_pwm(duration=5):
         time.sleep(next_pulse - now)
 
       PIN.write(True)
+      PIN2.write(True)
       pulse_start = time.monotonic()
       while time.monotonic() - pulse_start < duty:
         pass  # busy wait for more precise high pulse
       PIN.write(False)
+      PIN2.write(False)
 
       next_pulse += PWM_PERIOD
       
@@ -82,7 +85,9 @@ def stop_gpio_pwm():
   global pulse_width
   pulse_width = 1500  # Reset to neutral
   PIN.write(False)
+  PIN2.write(False)
   PIN.close()
+  PIN2.close()
   
 # print_info("Server starting up...")
 # print_warn("This is a test warning message.")
@@ -112,9 +117,6 @@ def main_server():
     if command == "":
       print_warn("Received empty command, ignoring.")
       return
-    
-    # Placeholder for command processing logic
-    print_info("Processing command: {}".format(command))
     
     if command == "STOP":
       pulse_width = 1500  # Neutral pulse width to stop the motor
@@ -166,10 +168,13 @@ def main_server():
       print_info("Logs cleared by command.")
     
 
+  rx_buffer = ""
+
   print_info("Server is listening on port 5000...")
   while True:
     if client_socket == None or client_address == None:
       client_connect()
+      rx_buffer = ""
       continue
     
     try:
@@ -181,14 +186,15 @@ def main_server():
         client_socket, client_address = None, None
         continue
 
-      command = data.decode().strip()
-      if not command:
-        print_warn("No command sent, ignoring.")
-        log_file.flush()
-        continue
+      rx_buffer += data.decode(errors="ignore")
+      while "\n" in rx_buffer:
+        command, rx_buffer = rx_buffer.split("\n", 1)
+        command = command.strip()
+        if not command:
+          continue
 
-      print_info("Received command from {}:{}".format(client_address[0], client_address[1]))
-      process_command(command)
+        print_info("Received command from {}:{}".format(client_address[0], client_address[1]))
+        process_command(command)
       
     except Exception as e:
       print_error("Error processing command: {}".format(e))
