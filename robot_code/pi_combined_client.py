@@ -5,7 +5,7 @@ import cv2
 
 USER = "robot"
 PASSWORD = "robot"
-HOST = "192.168.10.69"
+HOST = "192.168.10.78"
 MAIN_PORT = 5000
 STREAM_PORT = 5001
 client: socket.socket = None
@@ -36,6 +36,7 @@ def main_client(retry_count=0):
   # Open the secure file transfer.
   sftp = ssh.open_sftp()
   sftp.put(os.path.join(os.getcwd(), "robot_code", "pi_combined_server.py"), 'pi_combined_server.py')
+  sftp.put(os.path.join(os.getcwd(), "robot_code", "pwm_diagnostics.py"), 'pwm_diagnostics.py')
   # sftp.put(os.path.join(os.getcwd(), "robot_code", "test_code.py"), 'test_code.py')
   sftp.get('server.log', os.path.join(os.getcwd(), "robot_code", "server.log"))
   # print("Fetched server logs from robot")
