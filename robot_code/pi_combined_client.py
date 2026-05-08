@@ -16,6 +16,23 @@ def full_exit():
   if client != None:
     client.close()
   stop_event.set()
+  
+  # Grab the logs for the current session before exiting.
+  try: 
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(HOST, username=USER, password=PASSWORD)
+    
+    # Open the secure file transfer.
+    sftp = ssh.open_sftp()
+    # sftp.put(os.path.join(os.getcwd(), "robot_code", "test_code.py"), 'test_code.py')
+    sftp.get('server.log', os.path.join(os.getcwd(), "robot_code", "server.log"))
+    # print("Fetched server logs from robot")
+    sftp.close()
+    ssh.close()
+  except Exception as e:
+    print("Failed to fetch logs from robot: {}".format(e))
+  
   sys.exit(0)
 
 def main_client(retry_count=0):
@@ -36,7 +53,6 @@ def main_client(retry_count=0):
   # Open the secure file transfer.
   sftp = ssh.open_sftp()
   sftp.put(os.path.join(os.getcwd(), "robot_code", "pi_combined_server.py"), 'pi_combined_server.py')
-  sftp.put(os.path.join(os.getcwd(), "robot_code", "pwm_diagnostics.py"), 'pwm_diagnostics.py')
   # sftp.put(os.path.join(os.getcwd(), "robot_code", "test_code.py"), 'test_code.py')
   sftp.get('server.log', os.path.join(os.getcwd(), "robot_code", "server.log"))
   # print("Fetched server logs from robot")
@@ -167,13 +183,13 @@ def start_hud():
         if event.key == pygame.K_0:
           client.send("STOP\n".encode())
         if event.key == pygame.K_1:
-          client.send("LOW_FWD\n".encode())
+          client.send("CALIBRATE_UP_PIN1\n".encode())
         if event.key == pygame.K_2:
-          client.send("HIGH_FWD\n".encode())
+          client.send("CALIBRATE_DOWN_PIN1\n".encode())
         if event.key == pygame.K_3:
-          client.send("LOW_BWD\n".encode())
+          client.send("CALIBRATE_UP_PIN2\n".encode())
         if event.key == pygame.K_4:
-          client.send("HIGH_BWD\n".encode())
+          client.send("CALIBRATE_DOWN_PIN2\n".encode())
 
       # Handle continuous key state every frame so neutral is always transmitted.
       keys = pygame.key.get_pressed()
@@ -181,7 +197,7 @@ def start_hud():
       d = int(keys[pygame.K_d])
       left_y = -a + d
 
-      wanted_pulse_width = 1500 + (-500 * left_y)
+      wanted_pulse_width = 1500 + (-100 * left_y)
       pulse_width = lerp(pulse_width, wanted_pulse_width, 1)  # Smoothly interpolate towards the target pulse width
 
       pulse_width_text = FONT.render(f"Pulse Width: {pulse_width:.2f}", True, (255, 255, 255))

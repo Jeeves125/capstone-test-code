@@ -2,6 +2,58 @@ from periphery import GPIO
 from datetime import datetime
 import socket, threading, sys, os, time
 
+class Pin:
+  def __init__(self, pin_number, direction, inverse=False, offset=0):
+    self.gpio = GPIO(pin_number, direction)
+    self.gpio.write(False)  # Ensure pin starts LOW
+
+    self.inverse = inverse
+    self.deadband = 50
+    self.offset = offset
+
+  def write(self, value):
+    self.gpio.write(value)
+
+  def close(self):
+    self.gpio.close()
+    
+def try_save_pin_states():
+  pickle_path = os.path.join(BASE_DIR, "pin_states.pkl")
+  try:
+    import pickle
+    with open(pickle_path, 'wb') as f:
+      pickle.dump({
+        "PIN": {
+          "inverse": PIN.inverse,
+          "offset": PIN.offset,
+        },
+        "PIN2": {
+          "inverse": PIN2.inverse,
+          "offset": PIN2.offset,
+        }
+      }, f)
+    print_info("Pin states saved to {}".format(pickle_path))
+  except Exception as e:
+    print_error("Failed to save pin states: {}".format(e))
+    
+def try_load_pin_states():
+  pickle_path = os.path.join(BASE_DIR, "pin_states.pkl")
+  if not os.path.exists(pickle_path):
+    print_info("No saved pin states found at {}, starting with defaults.".format(pickle_path))
+    return
+
+  try:
+    import pickle
+    with open(pickle_path, 'rb') as f:
+      data = pickle.load(f)
+      PIN.inverse = data.get("PIN", {}).get("inverse", False)
+      PIN.offset = data.get("PIN", {}).get("offset", 0)
+      PIN2.inverse = data.get("PIN2", {}).get("inverse", False)
+      PIN2.offset = data.get("PIN2", {}).get("offset", 0)
+    print_info("Pin states loaded from {}".format(pickle_path))
+  except Exception as e:
+    print_error("Failed to load pin states: {}".format(e))
+    
 stop_event = threading.Event()
 pwm_lock = threading.Lock()
 pwm_thread = None
@@ -44,38 +96,48 @@ def full_exit():
     log_file.close()
   stop_event.set()
   stop_gpio_pwm()
+  try_save_pin_states()
   sys.exit(0)
 
 
 """ PWM using GPIO toggling (50 hz, 1000-2000 microsecond pulse width) """
-PIN = GPIO(54, "out")
-PIN2 = GPIO(35, "out")
+PIN = Pin(54, "out")
+PIN2 = Pin(35, "out")
+try_load_pin_states()
 PWM_FREQ = 50
-PWM_PERIOD_NS = 20_000_000
-pulse_width = 1500
-duration_start_time_ns = 0
+PWM_PERIOD_US = 20_000
+PWM_PERIOD_S = 1.0 / PWM_FREQ
+# neutral and deadband settings
 NEUTRAL_PULSE_WIDTH = 1500
-NEUTRAL_DEADBAND_US = 15
+# stored pulse_width is the raw commanded value;
+pulse_width = NEUTRAL_PULSE_WIDTH
+duration_start_time_ns = 0
 
 
-def normalize_pulse_width(value):
-  if abs(value - NEUTRAL_PULSE_WIDTH) <= NEUTRAL_DEADBAND_US:
-    return NEUTRAL_PULSE_WIDTH
+def configure_pulse_width(value, pin: Pin):
+  # First normalize around the deadband
+  deadband = getattr(pin, "deadband", 50)
+  if abs(value - NEUTRAL_PULSE_WIDTH) <= deadband:
+    value = NEUTRAL_PULSE_WIDTH
+
+  # Then apply inversion if needed
+  if getattr(pin, "inverse", False):
+    pw_magnitude = value - NEUTRAL_PULSE_WIDTH
+    value = NEUTRAL_PULSE_WIDTH - pw_magnitude
+    
+  # Finally, apply the offset
+  value += getattr(pin, "offset", 0)
+
   return value
 
-
-def start_gpio_pwm(duration=5):
-  """Software PWM loop using perf_counter_ns for the highest practical timer resolution."""
-  global duration_start_time_ns, pulse_width
+def start_pwm_loop(pin, stop_event, get_pulse_width, frequency=50):
   try:
-    duration_start_time_ns = time.perf_counter_ns()
+    period_ns = int(1e9 / frequency)
     next_cycle_ns = time.perf_counter_ns()
 
     while not stop_event.is_set():
-      with pwm_lock:
-        current_pw = normalize_pulse_width(pulse_width)
-
-      high_time_ns = max(900_000, min(2_100_000, current_pw * 1_000))
+      pulse_width = get_pulse_width()
+      high_time_ns = max(900_000, min(2_100_000, pulse_width * 1_000))
 
       now_ns = time.perf_counter_ns()
       time_to_cycle_ns = next_cycle_ns - now_ns
@@ -88,31 +150,19 @@ def start_gpio_pwm(duration=5):
       if stop_event.is_set():
         break
 
-      PIN.write(True)
-      PIN2.write(True)
+      pin.write(True)
       pulse_start_ns = time.perf_counter_ns()
       while not stop_event.is_set() and (time.perf_counter_ns() - pulse_start_ns) < high_time_ns:
         pass
-      PIN.write(False)
-      PIN2.write(False)
+      pin.write(False)
 
-      next_cycle_ns += PWM_PERIOD_NS
-
-      if current_pw != NEUTRAL_PULSE_WIDTH and duration and (time.perf_counter_ns() - duration_start_time_ns) >= (duration * 1_000_000_000):
-        print_warn("Stopped motor due to inactivity")
-        with pwm_lock:
-          pulse_width = NEUTRAL_PULSE_WIDTH
-        duration_start_time_ns = time.perf_counter_ns()
+      next_cycle_ns += period_ns
+  
   except Exception as e:
     print_error(f"Error in PWM thread: {e}")
     full_exit()
 
-
 def stop_gpio_pwm():
-  global pulse_width, pwm_thread
-  with pwm_lock:
-    pulse_width = NEUTRAL_PULSE_WIDTH
-
   stop_event.set()
   try:
     PIN.write(False)
@@ -130,8 +180,6 @@ def stop_gpio_pwm():
   except Exception:
     pass
 
-  pwm_thread = None
-
 
 def main_server():
   global client_socket, client_address, pulse_width, duration_start_time_ns, pwm_thread
@@ -147,8 +195,15 @@ def main_server():
     client_socket, client_address = server.accept()
 
     if pwm_thread is None or not pwm_thread.is_alive():
-      pwm_thread = threading.Thread(target=start_gpio_pwm, daemon=True)
-      pwm_thread.start()
+      # ensure the PWM state begins neutral when a client connects
+
+      pwm_threads = [
+        threading.Thread(target=start_pwm_loop, args=(PIN, stop_event, lambda: configure_pulse_width(pulse_width, PIN), PWM_FREQ)),
+        threading.Thread(target=start_pwm_loop, args=(PIN2, stop_event, lambda: configure_pulse_width(pulse_width, PIN2), PWM_FREQ)),
+      ]
+      for thread in pwm_threads:
+        thread.start()
+      pwm_thread = pwm_threads[0]
 
   def process_command(command):
     global client_socket, client_address, pulse_width, log_file, duration_start_time_ns
@@ -158,8 +213,6 @@ def main_server():
       return
 
     if command == "STOP":
-      with pwm_lock:
-        pulse_width = NEUTRAL_PULSE_WIDTH
       duration_start_time_ns = time.perf_counter_ns()
 
     if command.startswith("PWM"):
@@ -171,8 +224,6 @@ def main_server():
           print_error("PWM value out of range (1000-2000), ignoring command.")
           return
 
-        pwm_command_value = normalize_pulse_width(pwm_command_value)
-
         with pwm_lock:
           if pwm_command_value != pulse_width:
             duration_start_time_ns = time.perf_counter_ns()
@@ -180,24 +231,20 @@ def main_server():
       except ValueError:
         print_error("Invalid PWM value.")
 
-    if command == "LOW_FWD":
-      with pwm_lock:
-        pulse_width = 1700
+    if command == "CALIBRATE_UP_PIN1":
+      PIN.offset += 10
       duration_start_time_ns = time.perf_counter_ns()
 
-    if command == "HIGH_FWD":
-      with pwm_lock:
-        pulse_width = 1900
+    if command == "CALIBRATE_DOWN_PIN1":
+      PIN.offset -= 10
       duration_start_time_ns = time.perf_counter_ns()
 
-    if command == "LOW_BWD":
-      with pwm_lock:
-        pulse_width = 1300
+    if command == "CALIBRATE_UP_PIN2":
+      PIN2.offset += 10
       duration_start_time_ns = time.perf_counter_ns()
 
-    if command == "HIGH_BWD":
-      with pwm_lock:
-        pulse_width = 1100
+    if command == "CALIBRATE_DOWN_PIN2":
+      PIN2.offset -= 10
       duration_start_time_ns = time.perf_counter_ns()
 
     if command == "LOGS":
@@ -230,6 +277,7 @@ def main_server():
         log_file.flush()
         client_socket.close()
         client_socket, client_address = None, None
+        try_save_pin_states()
         continue
 
       rx_buffer += data.decode(errors="ignore")
@@ -239,7 +287,7 @@ def main_server():
         if not command:
           continue
 
-        print_info("Received command from {}:{}".format(client_address[0], client_address[1]))
+        # print_info("Received command from {}:{}".format(client_address[0], client_address[1]))
         process_command(command)
 
     except Exception as e:
