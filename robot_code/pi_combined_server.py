@@ -110,7 +110,8 @@ PWM_PERIOD_S = 1.0 / PWM_FREQ
 # neutral and deadband settings
 NEUTRAL_PULSE_WIDTH = 1500
 # stored pulse_width is the raw commanded value;
-pulse_width = NEUTRAL_PULSE_WIDTH
+pulse_width_1 = NEUTRAL_PULSE_WIDTH
+pulse_width_2 = NEUTRAL_PULSE_WIDTH
 duration_start_time_ns = 0
 
 
@@ -198,15 +199,15 @@ def main_server():
       # ensure the PWM state begins neutral when a client connects
 
       pwm_threads = [
-        threading.Thread(target=start_pwm_loop, args=(PIN, stop_event, lambda: configure_pulse_width(pulse_width, PIN), PWM_FREQ)),
-        threading.Thread(target=start_pwm_loop, args=(PIN2, stop_event, lambda: configure_pulse_width(pulse_width, PIN2), PWM_FREQ)),
+        threading.Thread(target=start_pwm_loop, args=(PIN, stop_event, lambda: configure_pulse_width(pulse_width_1, PIN), PWM_FREQ)),
+        threading.Thread(target=start_pwm_loop, args=(PIN2, stop_event, lambda: configure_pulse_width(pulse_width_2, PIN2), PWM_FREQ)),
       ]
       for thread in pwm_threads:
         thread.start()
       pwm_thread = pwm_threads[0]
 
   def process_command(command):
-    global client_socket, client_address, pulse_width, log_file, duration_start_time_ns
+    global client_socket, client_address, pulse_width_1, pulse_width_2, log_file, duration_start_time_ns
 
     if command == "":
       print_warn("Received empty command, ignoring.")
@@ -215,8 +216,8 @@ def main_server():
     if command == "STOP":
       duration_start_time_ns = time.perf_counter_ns()
 
-    if command.startswith("PWM"):
-      command_value = command.replace("PWM", "")
+    if command.startswith("PWMONE"):
+      command_value = command.replace("PWMONE", "")
       try:
         pwm_command_value = int(command_value)
 
@@ -225,9 +226,25 @@ def main_server():
           return
 
         with pwm_lock:
-          if pwm_command_value != pulse_width:
+          if pwm_command_value != pulse_width_1:
             duration_start_time_ns = time.perf_counter_ns()
-          pulse_width = pwm_command_value
+          pulse_width_1 = pwm_command_value
+      except ValueError:
+        print_error("Invalid PWM value.")
+        
+    if command.startswith("PWMTWO"):
+      command_value = command.replace("PWMTWO", "")
+      try:
+        pwm_command_value = int(command_value)
+
+        if pwm_command_value < 1000 or pwm_command_value > 2000:
+          print_error("PWM value out of range (1000-2000), ignoring command.")
+          return
+
+        with pwm_lock:
+          if pwm_command_value != pulse_width_2:
+            duration_start_time_ns = time.perf_counter_ns()
+          pulse_width_2 = pwm_command_value
       except ValueError:
         print_error("Invalid PWM value.")
 

@@ -5,7 +5,7 @@ import cv2
 
 USER = "robot"
 PASSWORD = "robot"
-HOST = "192.168.10.78"
+HOST = "192.168.10.79"
 MAIN_PORT = 5000
 STREAM_PORT = 5001
 client: socket.socket = None
@@ -163,12 +163,15 @@ def start_hud():
   SCREEN = pygame.display.set_mode((800, 800))
   FONT = pygame.font.SysFont("Arial", 24)
   
+  JOYSTICK = pygame.joystick.Joystick(0) if pygame.joystick.get_count() > 0 else None
+  
   while True:
     delta = CLOCK.tick(10)
     for event in pygame.event.get():
       if event.type == pygame.QUIT:
         pygame.quit()
         full_exit()
+      
       if event.type == pygame.KEYDOWN:
         if event.key == pygame.K_SEMICOLON:
           client.send("LOGS\n".encode())
@@ -192,19 +195,31 @@ def start_hud():
           client.send("CALIBRATE_DOWN_PIN2\n".encode())
 
       # Handle continuous key state every frame so neutral is always transmitted.
-      keys = pygame.key.get_pressed()
-      a = int(keys[pygame.K_a])
-      d = int(keys[pygame.K_d])
-      left_y = -a + d
+      if (JOYSTICK != None):
+        left_y = round(-JOYSTICK.get_axis(1) * 4)  # Invert Y-axis for typical joystick behavior
+        right_y = round(-JOYSTICK.get_axis(4) * 4)  # Invert Y-axis for typical joystick behavior
+        # print(left_y)
+        pulse_width_1 = 1500 + (-50 * left_y)
+        pulse_width_2 = 1500 + (-50 * right_y)
+        pulse_width_text = FONT.render(f"USING JOYSTICK: Pulse Width 1: {pulse_width_1:.2f}, Pulse Width 2: {pulse_width_2:.2f}", True, (255, 255, 255))
+        client.send(("PWMONE" + str(int(pulse_width_1)) + "\n").encode())
+        client.send(("PWMTWO" + str(int(pulse_width_2)) + "\n").encode())
+        SCREEN.fill((200, 50, 50))
+        SCREEN.blit(pulse_width_text, (20, 20))
+      else:
+        keys = pygame.key.get_pressed()
+        a = int(keys[pygame.K_a])
+        d = int(keys[pygame.K_d])
+        left_y = -a + d
 
-      wanted_pulse_width = 1500 + (-100 * left_y)
-      pulse_width = lerp(pulse_width, wanted_pulse_width, 1)  # Smoothly interpolate towards the target pulse width
+        wanted_pulse_width = 1500 + (-100 * left_y)
+        pulse_width = lerp(pulse_width, wanted_pulse_width, 1)  # Smoothly interpolate towards the target pulse width
 
-      pulse_width_text = FONT.render(f"Pulse Width: {pulse_width:.2f}", True, (255, 255, 255))
-      client.send(("PWM" + str(int(pulse_width)) + "\n").encode())
+        pulse_width_text = FONT.render(f"USING KEYS: Pulse Width: {pulse_width:.2f}", True, (255, 255, 255))
+        client.send(("PWMONE" + str(int(pulse_width)) + "\n").encode())
 
-      SCREEN.fill((200, 50, 50))
-      SCREEN.blit(pulse_width_text, (20, 20))
+        SCREEN.fill((200, 50, 50))
+        SCREEN.blit(pulse_width_text, (20, 20))
 
       pygame.display.update()
 
