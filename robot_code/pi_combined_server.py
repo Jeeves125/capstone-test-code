@@ -102,7 +102,7 @@ def full_exit():
 
 """ PWM using GPIO toggling (50 hz, 1000-2000 microsecond pulse width) """
 PIN = Pin(54, "out")
-PIN2 = Pin(35, "out")
+PIN2 = Pin(35, "out", inverse=True)
 try_load_pin_states()
 PWM_FREQ = 50
 PWM_PERIOD_US = 20_000
