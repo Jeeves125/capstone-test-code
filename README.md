@@ -1,0 +1,2 @@
+# The main files that were run during the capstone presentation were the pi_combined_server and client files in the robot code folder. 
+The rest of the files were different tests or pseudo code that I made, and the engine directory holds the 3d engine I was planning to use to display the depthmap. There is no runner file that uses this library (and I am still working on this library on my own time as well, so this is not a fully updated version, but it should still have the features needed to display the dots from a depth map in 3d space).

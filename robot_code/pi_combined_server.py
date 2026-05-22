@@ -1,5 +1,6 @@
 from periphery import GPIO
 from datetime import datetime
+import glob
 import socket, threading, sys, os, time
 
 class Pin:
@@ -57,6 +58,7 @@ def try_load_pin_states():
 stop_event = threading.Event()
 pwm_lock = threading.Lock()
 pwm_thread = None
+camera_thread = None
 client_socket, client_address = None, None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -113,6 +115,14 @@ NEUTRAL_PULSE_WIDTH = 1500
 pulse_width_1 = NEUTRAL_PULSE_WIDTH
 pulse_width_2 = NEUTRAL_PULSE_WIDTH
 duration_start_time_ns = 0
+
+COMMAND_PORT = 5000
+CAMERA_STREAM_PORT = 5001
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 360
+CAMERA_FPS = 20
+JPEG_QUALITY = 60
+VIDEO_FRAME_SIZE_BYTES = 4
 
 
 def configure_pulse_width(value, pin: Pin):
@@ -182,12 +192,181 @@ def stop_gpio_pwm():
     pass
 
 
+def open_webcam_capture(to_open="/dev/video0"):
+  try:
+    import cv2
+  except Exception as e:
+    raise RuntimeError("OpenCV is required for camera streaming: {}".format(e))
+
+  print_info("Trying webcam device: {}".format(to_open))
+
+  capture = cv2.VideoCapture(to_open, cv2.CAP_V4L2)
+  capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+  capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+  capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+  if capture.isOpened():
+    print_info("Using webcam device: {}".format(to_open))
+    return capture
+
+  capture.release()
+
+  raise RuntimeError("Failed to open any webcam device")
+
+
+def configure_camera_capture(capture):
+  try:
+    import cv2
+  except Exception as e:
+    raise RuntimeError("OpenCV is required for camera streaming: {}".format(e))
+
+  capture.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+  capture.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+  capture.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+  capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+  return capture
+
+
+def get_camera_candidates():
+  candidates = ["/dev/video0", "/dev/video4"]
+  candidates.extend(sorted(glob.glob("/dev/video*")))
+
+  seen = []
+  unique_candidates = []
+  for candidate in candidates:
+    if candidate in seen:
+      continue
+    seen.append(candidate)
+    unique_candidates.append(candidate)
+
+  return unique_candidates
+
+
+def run_camera_server(stop_event):
+  try:
+    import cv2
+  except Exception as e:
+    print_error("Camera stream disabled because OpenCV could not be imported: {}".format(e))
+    return
+
+  while not stop_event.is_set():
+    video_server = None
+    video_client = None
+    cameras = []
+    try:
+      for candidate in get_camera_candidates():
+        if len(cameras) >= 2:
+          break
+
+        try:
+          camera = configure_camera_capture(open_webcam_capture(candidate))
+          cameras.append(camera)
+        except Exception as e:
+          print_warn("Skipping camera device {}: {}".format(candidate, e))
+
+      if not cameras:
+        raise RuntimeError("No usable camera devices were found")
+
+      if len(cameras) == 1:
+        print_warn("Only one camera was found; duplicating its frames for the stereo client.")
+
+      video_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      video_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+      video_server.bind(("0.0.0.0", CAMERA_STREAM_PORT))
+      video_server.listen(1)
+      video_server.settimeout(1.0)
+      
+      print_info("Waiting for video connection on TCP {}...".format(CAMERA_STREAM_PORT))
+      
+
+      while not stop_event.is_set() and video_client is None:
+        try:
+          video_client, video_address = video_server.accept()
+          print_info("Video client connected from {}. Starting stream...".format(video_address[0]))
+        except socket.timeout:
+          continue
+
+      while not stop_event.is_set() and video_client is not None:
+        frames = []
+
+        if len(cameras) == 1:
+          ok, frame = cameras[0].read()
+          if not ok:
+            time.sleep(0.01)
+            continue
+          frames = [frame, frame]
+        else:
+          ok1, frame1 = cameras[0].read()
+          ok2, frame2 = cameras[1].read()
+          if not ok1 or not ok2:
+            time.sleep(0.01)
+            continue
+          frames = [frame1, frame2]
+
+        encoded_frames = []
+        for frame in frames:
+          ok, encoded = cv2.imencode(
+            ".jpg",
+            frame,
+            [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+          )
+          if not ok:
+            encoded_frames = []
+            break
+          encoded_frames.append(encoded.tobytes())
+
+        if len(encoded_frames) != 2:
+          continue
+
+        try:
+          for payload in encoded_frames:
+            video_client.sendall(len(payload).to_bytes(VIDEO_FRAME_SIZE_BYTES, byteorder="big"))
+            video_client.sendall(payload)
+        except Exception as e:
+          print_warn("Video client disconnected or stream failed: {}".format(e))
+          break
+
+    except Exception as e:
+      print_error("Camera server error: {}".format(e))
+      time.sleep(1.0)
+    finally:
+      try:
+        for camera in cameras:
+          try:
+            camera.release()
+          except Exception:
+            pass
+      except Exception:
+        pass
+
+      try:
+        if video_client is not None:
+          video_client.close()
+      except Exception:
+        pass
+
+      try:
+        if video_server is not None:
+          video_server.close()
+      except Exception:
+        pass
+
+
+def start_camera_server():
+  global camera_thread
+  if camera_thread is None or not camera_thread.is_alive():
+    print_info("Starting camera stream service...")
+    camera_thread = threading.Thread(target=run_camera_server, args=(stop_event,), daemon=True)
+    camera_thread.start()
+
+
 def main_server():
   global client_socket, client_address, pulse_width, duration_start_time_ns, pwm_thread
   server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   print_info("Starting server...")
-  server.bind(('0.0.0.0', 5000))
+  server.bind(('0.0.0.0', COMMAND_PORT))
   server.listen(1)
+  start_camera_server()
 
   def client_connect():
     global client_socket, client_address, pwm_thread
@@ -280,7 +459,7 @@ def main_server():
 
   rx_buffer = ""
 
-  print_info("Server is listening on port 5000...")
+  print_info("Server is listening on port {}...".format(COMMAND_PORT))
   while True:
     if client_socket == None or client_address == None:
       client_connect()

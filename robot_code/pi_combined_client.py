@@ -1,23 +1,32 @@
 import socket, pygame, threading, paramiko, os
 import sys
+import time
 
 import cv2
+import numpy as np
+
+from calibrated_depth_mapper import CalibratedStereoDepthMapper
 
 USER = "robot"
 PASSWORD = "robot"
-HOST = "192.168.10.79"
+HOST = "192.168.10.80"
 MAIN_PORT = 5000
 STREAM_PORT = 5001
 client: socket.socket = None
+video_client: socket.socket = None
+
+depth_mapper = CalibratedStereoDepthMapper()
 
 stop_event = threading.Event()
 
 def full_exit():
   if client != None:
     client.close()
+  if video_client != None:
+    video_client.close()
   stop_event.set()
-  
   # Grab the logs for the current session before exiting.
+  print("Trying to fetch logs from robot before exiting...")
   try: 
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -30,6 +39,7 @@ def full_exit():
     # print("Fetched server logs from robot")
     sftp.close()
     ssh.close()
+    print("Fetched server logs from robot, exiting now.")
   except Exception as e:
     print("Failed to fetch logs from robot: {}".format(e))
   
@@ -53,6 +63,7 @@ def main_client(retry_count=0):
   # Open the secure file transfer.
   sftp = ssh.open_sftp()
   sftp.put(os.path.join(os.getcwd(), "robot_code", "pi_combined_server.py"), 'pi_combined_server.py')
+  sftp.put(os.path.join(os.getcwd(), "pi_cam_server.py"), "pi_cam_server.py")
   # sftp.put(os.path.join(os.getcwd(), "robot_code", "test_code.py"), 'test_code.py')
   sftp.get('server.log', os.path.join(os.getcwd(), "robot_code", "server.log"))
   # print("Fetched server logs from robot")
@@ -64,6 +75,13 @@ def main_client(retry_count=0):
 
   for pid in pids:
     print(f"Killed server running at :5000, PID: {pid}")
+    ssh.exec_command(f"sudo kill -9 {pid}")
+    
+  stdin, stdout, stderr = ssh.exec_command("sudo lsof -ti :5001")
+  pids = stdout.read().decode().strip().splitlines()
+
+  for pid in pids:
+    print(f"Killed server running at :5001, PID: {pid}")
     ssh.exec_command(f"sudo kill -9 {pid}")
   
   # ONLY USE FOR DEBUGGING
@@ -84,8 +102,8 @@ def main_client(retry_count=0):
     try:
       client.connect((HOST, MAIN_PORT))
       print("Connected to robot.")
-      # cam_client_thread = threading.Thread(target=run_camera_client, args=(stop_event,))
-      # cam_client_thread.start()
+      cam_client_thread = threading.Thread(target=run_camera_client, args=(stop_event,))
+      cam_client_thread.start()
       start_hud()
       
     except Exception as e:
@@ -96,37 +114,77 @@ def main_client(retry_count=0):
   return connect_to_server()  
     
 def run_camera_client(stop_event):
-  pipeline = (
-    f"udpsrc port={STREAM_PORT} buffer-size=65536 ! "
-    "application/x-rtp, encoding-name=H264, payload=96 ! "
-    "rtph264depay ! "
-    "avdec_h264 ! "  # Replace with nvh264dec for Linux NVIDIA GPU decoding, or vaapih264dec for Linux Intel GPU decoding
-    "videoconvert ! "
-    "appsink sync=false max-buffers=1 drop=true"
-  )
-
-  cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-
-  if not cap.isOpened():
-      print("Failed to open GStreamer UDP pipeline on this machine.")
-      print("Install OpenCV with GStreamer support and verify GStreamer is installed.")
-      full_exit()
-
-  while not stop_event.is_set():
+  global video_client
+  connect_error = None
+  for attempt in range(50):
     try:
-      ret, frame = cap.read()
-      if not ret:
-          continue
-
-      # result = my_algorithm(frame)
-
-      cv2.imshow("video", frame)
-
-      if cv2.waitKey(1) == 27:
-          break
+      video_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      video_client.settimeout(1.0)
+      video_client.connect((HOST, STREAM_PORT))
+      break
     except Exception as e:
-      print("Error reading video frame: {}".format(e))
-      full_exit()
+      connect_error = e
+      try:
+        video_client.close()
+      except Exception:
+        pass
+      video_client = None
+      time.sleep(0.1)
+  else:
+    print("Failed to connect to video stream: {}".format(connect_error))
+    full_exit()
+
+  def recv_exact(sock, size):
+    chunks = []
+    received = 0
+    while received < size:
+      chunk = sock.recv(size - received)
+      if not chunk:
+        return None
+      chunks.append(chunk)
+      received += len(chunk)
+    return b"".join(chunks)
+
+  try:
+    while not stop_event.is_set():
+      try:
+        frames = [None, None]
+        for i in range(2):
+          header = recv_exact(video_client, 4)
+          if header is None:
+            break
+          frame_size = int.from_bytes(header, byteorder="big")
+          packet = recv_exact(video_client, frame_size)
+          if packet is None:
+            break
+
+          frame_array = np.frombuffer(packet, dtype=np.uint8)
+          frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+          if frame is None:
+              continue
+          frames[i] = frame
+
+        # depth_map = depth_mapper.run(frames[0], frames[1], 1) if all(f is not None for f in frames) else None
+    
+        print("Recieved following frames from robot: {}".format("Frames received" if all(f is not None for f in frames) else "Missing frames"))
+
+        if frames[0] is not None and frames[1] is not None:
+          combined = np.hstack((frames[0], frames[1]))
+          cv2.imshow("video", combined)
+
+        if cv2.waitKey(1) == 27:
+            break
+      except Exception as e:
+        if isinstance(e, socket.timeout):
+          continue
+        print("Error reading video frame: {}".format(e))
+        full_exit()
+  finally:
+    try:
+      video_client.close()
+    except Exception:
+      pass
+    cv2.destroyAllWindows()
 
 PWM_PIN = 14
 wanted_pulse_width = 1500  # Neutral pulse width for ESC (Electronic Speed Controller)
@@ -212,7 +270,7 @@ def start_hud():
         d = int(keys[pygame.K_d])
         left_y = -a + d
 
-        wanted_pulse_width = 1500 + (-100 * left_y)
+        wanted_pulse_width = 1500 + (-300 * left_y)
         pulse_width = lerp(pulse_width, wanted_pulse_width, 1)  # Smoothly interpolate towards the target pulse width
 
         pulse_width_text = FONT.render(f"USING KEYS: Pulse Width: {pulse_width:.2f}", True, (255, 255, 255))
