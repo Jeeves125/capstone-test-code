@@ -1,25 +1,40 @@
 import socket, pygame, threading, paramiko, os
 import sys
 import time
+import struct
 
 import cv2
 import numpy as np
 
 from calibrated_depth_mapper import CalibratedStereoDepthMapper
 
+pygame.init()
+
 USER = "robot"
 PASSWORD = "robot"
 HOST = "192.168.10.80"
 MAIN_PORT = 5000
 STREAM_PORT = 5001
+UDP_MAGIC = b"FRM2"
+UDP_HEADER = struct.Struct("!4sBIHH")
+MAX_PENDING_SECONDS = 1.0
+
+CLOCK = pygame.time.Clock()
+SCREEN = pygame.display.set_mode((800, 800))
+FONT = pygame.font.SysFont("Arial", 24)
+JOYSTICK = pygame.joystick.Joystick(0) if pygame.joystick.get_count() > 0 else None
+
 client: socket.socket = None
 video_client: socket.socket = None
 
-depth_mapper = CalibratedStereoDepthMapper()
+depth_mapper = CalibratedStereoDepthMapper("stereo_calibration_refined")
 
 stop_event = threading.Event()
 
 def full_exit():
+  if stop_event.is_set():
+    return
+  
   if client != None:
     client.close()
   if video_client != None:
@@ -115,70 +130,99 @@ def main_client(retry_count=0):
     
 def run_camera_client(stop_event):
   global video_client
-  connect_error = None
-  for attempt in range(50):
-    try:
-      video_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      video_client.settimeout(1.0)
-      video_client.connect((HOST, STREAM_PORT))
-      break
-    except Exception as e:
-      connect_error = e
-      try:
-        video_client.close()
-      except Exception:
-        pass
-      video_client = None
-      time.sleep(0.1)
-  else:
-    print("Failed to connect to video stream: {}".format(connect_error))
+  try:
+    video_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    video_client.bind(("", STREAM_PORT))
+    video_client.settimeout(1.0)
+  except Exception as e:
+    print("Failed to open UDP video socket: {}".format(e))
     full_exit()
 
-  def recv_exact(sock, size):
-    chunks = []
-    received = 0
-    while received < size:
-      chunk = sock.recv(size - received)
-      if not chunk:
-        return None
-      chunks.append(chunk)
-      received += len(chunk)
-    return b"".join(chunks)
+  pending_frames = {}
+
+  def cleanup_pending():
+    now = time.monotonic()
+    expired = [seq for seq, entry in pending_frames.items() if now - entry["created_at"] > MAX_PENDING_SECONDS]
+    for seq in expired:
+      pending_frames.pop(seq, None)
+
+  def decode_ready_pair():
+    for frame_sequence in sorted(pending_frames):
+      entry = pending_frames[frame_sequence]
+      left_entry = entry.get(0)
+      right_entry = entry.get(1)
+      if not left_entry or not right_entry:
+        continue
+      if len(left_entry["chunks"]) != left_entry["chunk_count"] or len(right_entry["chunks"]) != right_entry["chunk_count"]:
+        continue
+
+      left_payload = b"".join(left_entry["chunks"][chunk_index] for chunk_index in range(left_entry["chunk_count"]))
+      right_payload = b"".join(right_entry["chunks"][chunk_index] for chunk_index in range(right_entry["chunk_count"]))
+      pending_frames.pop(frame_sequence, None)
+      return left_payload, right_payload
+
+    return None
 
   try:
     while not stop_event.is_set():
       try:
-        frames = [None, None]
-        for i in range(2):
-          header = recv_exact(video_client, 4)
-          if header is None:
-            break
-          frame_size = int.from_bytes(header, byteorder="big")
-          packet = recv_exact(video_client, frame_size)
-          if packet is None:
-            break
-
-          frame_array = np.frombuffer(packet, dtype=np.uint8)
-          frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
-          if frame is None:
-              continue
-          frames[i] = frame
-
-        # depth_map = depth_mapper.run(frames[0], frames[1], 1) if all(f is not None for f in frames) else None
-    
-        print("Recieved following frames from robot: {}".format("Frames received" if all(f is not None for f in frames) else "Missing frames"))
-
-        if frames[0] is not None and frames[1] is not None:
-          combined = np.hstack((frames[0], frames[1]))
-          cv2.imshow("video", combined)
-
-        if cv2.waitKey(1) == 27:
-            break
+        packet, _ = video_client.recvfrom(2048)
+      except socket.timeout:
+        cleanup_pending()
+        continue
       except Exception as e:
-        if isinstance(e, socket.timeout):
-          continue
         print("Error reading video frame: {}".format(e))
         full_exit()
+
+      if len(packet) < UDP_HEADER.size:
+        continue
+
+      magic, stream_id, frame_sequence, chunk_index, chunk_count = UDP_HEADER.unpack(packet[:UDP_HEADER.size])
+      if magic != UDP_MAGIC or stream_id not in (0, 1) or chunk_count == 0 or chunk_index >= chunk_count:
+        continue
+
+      entry = pending_frames.setdefault(frame_sequence, {
+        "created_at": time.monotonic(),
+        0: None,
+        1: None,
+      })
+
+      stream_entry = entry.get(stream_id)
+      if stream_entry is None:
+        entry[stream_id] = {
+          "chunk_count": chunk_count,
+          "chunks": {},
+        }
+      elif stream_entry["chunk_count"] != chunk_count:
+        pending_frames.pop(frame_sequence, None)
+        continue
+
+      entry[stream_id]["chunks"][chunk_index] = packet[UDP_HEADER.size:]
+
+      ready_pair = decode_ready_pair()
+      if ready_pair is None:
+        continue
+
+      left_payload, right_payload = ready_pair
+      left_frame_array = np.frombuffer(left_payload, dtype=np.uint8)
+      right_frame_array = np.frombuffer(right_payload, dtype=np.uint8)
+      left_frame = cv2.imdecode(left_frame_array, cv2.IMREAD_COLOR)
+      right_frame = cv2.imdecode(right_frame_array, cv2.IMREAD_COLOR)
+      if left_frame is None or right_frame is None:
+        continue
+
+      depth_surface, data = depth_mapper.run(left_frame, right_frame, 1)
+      SCREEN.fill((50, 200, 50))
+      if depth_surface is not None:
+        SCREEN.blit(depth_surface, (0, 0))
+        pygame.display.update()
+      # print("Recieved following frames from robot: {}".format("Frames received" if all(f is not None for f in frames) else "Missing frames"))
+
+      combined = np.hstack((left_frame, right_frame))
+      cv2.imshow("video", combined)
+
+      if cv2.waitKey(1) == 27:
+        break
   finally:
     try:
       video_client.close()
@@ -195,7 +239,6 @@ _max_delta = 50  # Maximum change in pulse width per frame to ensure smooth acce
 
 def start_hud():
   global _pulse_width, _max_delta, pulse_width, wanted_pulse_width
-  pygame.init()
   
   def lerp(a, b, t): 
       return a + (b - a) * t
@@ -216,12 +259,6 @@ def start_hud():
     return _pulse_width
     
     # pi.set_servo_pulsewidth(PWM_PIN, pulse_width)
-  
-  CLOCK = pygame.time.Clock()
-  SCREEN = pygame.display.set_mode((800, 800))
-  FONT = pygame.font.SysFont("Arial", 24)
-  
-  JOYSTICK = pygame.joystick.Joystick(0) if pygame.joystick.get_count() > 0 else None
   
   while True:
     delta = CLOCK.tick(10)
@@ -251,6 +288,27 @@ def start_hud():
           client.send("CALIBRATE_UP_PIN2\n".encode())
         if event.key == pygame.K_4:
           client.send("CALIBRATE_DOWN_PIN2\n".encode())
+        if event.key == pygame.K_t:
+            print("Running auto-tune on current frame...")
+            ok = depth_mapper.auto_tune_on_frame()
+            if ok:
+                print("Auto-tune applied — new matcher active.")
+        if event.key == pygame.K_u:
+            print("Running FULL auto-tune (expanded grid) on current frame... this may take a while")
+            ok = depth_mapper.auto_tune_full()
+            if ok:
+                print("Full auto-tune applied — new matcher active.")
+        if event.key == pygame.K_r:
+            print("Running ROI-focused auto-tune on current frame...")
+            ok = depth_mapper.auto_tune_roi(size_frac=0.5)
+            if ok:
+                print("ROI auto-tune applied — new matcher active.")
+        if event.key == pygame.K_e:
+            depth_mapper.ensemble_enabled = not depth_mapper.ensemble_enabled
+            print(f"Ensemble matching {'enabled' if depth_mapper.ensemble_enabled else 'disabled'}")
+        if event.key == pygame.K_m:
+            depth_mapper.temporal_median_enabled = not depth_mapper.temporal_median_enabled
+            print(f"Temporal median {'enabled' if depth_mapper.temporal_median_enabled else 'disabled'} (size={depth_mapper.temporal_median_size})")
 
       # Handle continuous key state every frame so neutral is always transmitted.
       if (JOYSTICK != None):
@@ -276,8 +334,8 @@ def start_hud():
         pulse_width_text = FONT.render(f"USING KEYS: Pulse Width: {pulse_width:.2f}", True, (255, 255, 255))
         client.send(("PWMONE" + str(int(pulse_width)) + "\n").encode())
 
-        SCREEN.fill((200, 50, 50))
-        SCREEN.blit(pulse_width_text, (20, 20))
+        # SCREEN.fill((200, 50, 50))
+        # SCREEN.blit(pulse_width_text, (20, 20))
 
       pygame.display.update()
 

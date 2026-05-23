@@ -1,7 +1,8 @@
 from periphery import GPIO
 from datetime import datetime
 import glob
-import socket, threading, sys, os, time
+import math
+import socket, threading, sys, os, time, struct
 
 class Pin:
   def __init__(self, pin_number, direction, inverse=False, offset=0):
@@ -122,7 +123,11 @@ CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 360
 CAMERA_FPS = 20
 JPEG_QUALITY = 60
-VIDEO_FRAME_SIZE_BYTES = 4
+UDP_MAGIC = b"FRM2"
+UDP_HEADER = struct.Struct("!4sBIHH")
+MAX_UDP_CHUNK_BYTES = 1200
+
+camera_client_host = None
 
 
 def configure_pulse_width(value, pin: Pin):
@@ -204,6 +209,7 @@ def open_webcam_capture(to_open="/dev/video0"):
   capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
   capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
   capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+  capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
   if capture.isOpened():
     print_info("Using webcam device: {}".format(to_open))
@@ -225,6 +231,24 @@ def configure_camera_capture(capture):
   capture.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
   capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
   return capture
+
+
+def read_synchronized_frames(cameras):
+  if len(cameras) == 1:
+    ok, frame = cameras[0].read()
+    if not ok:
+      return False, []
+    return True, [frame, frame]
+
+  if not cameras[0].grab() or not cameras[1].grab():
+    return False, []
+
+  ok1, frame1 = cameras[0].retrieve()
+  ok2, frame2 = cameras[1].retrieve()
+  if not ok1 or not ok2:
+    return False, []
+
+  return True, [frame1, frame2]
 
 
 def get_camera_candidates():
@@ -250,10 +274,11 @@ def run_camera_server(stop_event):
     return
 
   while not stop_event.is_set():
-    video_server = None
-    video_client = None
+    video_sock = None
     cameras = []
     try:
+      global camera_client_host
+
       for candidate in get_camera_candidates():
         if len(cameras) >= 2:
           break
@@ -270,38 +295,20 @@ def run_camera_server(stop_event):
       if len(cameras) == 1:
         print_warn("Only one camera was found; duplicating its frames for the stereo client.")
 
-      video_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      video_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-      video_server.bind(("0.0.0.0", CAMERA_STREAM_PORT))
-      video_server.listen(1)
-      video_server.settimeout(1.0)
-      
-      print_info("Waiting for video connection on TCP {}...".format(CAMERA_STREAM_PORT))
-      
+      video_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-      while not stop_event.is_set() and video_client is None:
-        try:
-          video_client, video_address = video_server.accept()
-          print_info("Video client connected from {}. Starting stream...".format(video_address[0]))
-        except socket.timeout:
+      print_info("Waiting for video destination on UDP {}...".format(CAMERA_STREAM_PORT))
+
+      while not stop_event.is_set() and camera_client_host is None:
+        time.sleep(0.05)
+
+      frame_sequence = 0
+      while not stop_event.is_set() and camera_client_host is not None:
+        client_address = (camera_client_host, CAMERA_STREAM_PORT)
+        ok, frames = read_synchronized_frames(cameras)
+        if not ok:
+          time.sleep(0.01)
           continue
-
-      while not stop_event.is_set() and video_client is not None:
-        frames = []
-
-        if len(cameras) == 1:
-          ok, frame = cameras[0].read()
-          if not ok:
-            time.sleep(0.01)
-            continue
-          frames = [frame, frame]
-        else:
-          ok1, frame1 = cameras[0].read()
-          ok2, frame2 = cameras[1].read()
-          if not ok1 or not ok2:
-            time.sleep(0.01)
-            continue
-          frames = [frame1, frame2]
 
         encoded_frames = []
         for frame in frames:
@@ -318,13 +325,25 @@ def run_camera_server(stop_event):
         if len(encoded_frames) != 2:
           continue
 
+        send_failed = False
         try:
-          for payload in encoded_frames:
-            video_client.sendall(len(payload).to_bytes(VIDEO_FRAME_SIZE_BYTES, byteorder="big"))
-            video_client.sendall(payload)
+          for stream_id, payload in enumerate(encoded_frames):
+            if not payload:
+              continue
+
+            chunk_count = max(1, math.ceil(len(payload) / MAX_UDP_CHUNK_BYTES))
+            for chunk_index in range(chunk_count):
+              start = chunk_index * MAX_UDP_CHUNK_BYTES
+              chunk = payload[start:start + MAX_UDP_CHUNK_BYTES]
+              packet = UDP_HEADER.pack(UDP_MAGIC, stream_id, frame_sequence, chunk_index, chunk_count) + chunk
+              video_sock.sendto(packet, client_address)
         except Exception as e:
           print_warn("Video client disconnected or stream failed: {}".format(e))
-          break
+          send_failed = True
+
+        frame_sequence = (frame_sequence + 1) % 0xFFFFFFFF
+        if send_failed:
+          continue
 
     except Exception as e:
       print_error("Camera server error: {}".format(e))
@@ -340,14 +359,8 @@ def run_camera_server(stop_event):
         pass
 
       try:
-        if video_client is not None:
-          video_client.close()
-      except Exception:
-        pass
-
-      try:
-        if video_server is not None:
-          video_server.close()
+        if video_sock is not None:
+          video_sock.close()
       except Exception:
         pass
 
@@ -369,10 +382,11 @@ def main_server():
   start_camera_server()
 
   def client_connect():
-    global client_socket, client_address, pwm_thread
+    global client_socket, client_address, pwm_thread, camera_client_host
     stop_event.clear()
     print_info("Waiting for a controller to connect...")
     client_socket, client_address = server.accept()
+    camera_client_host = client_address[0]
 
     if pwm_thread is None or not pwm_thread.is_alive():
       # ensure the PWM state begins neutral when a client connects
@@ -473,6 +487,7 @@ def main_server():
         log_file.flush()
         client_socket.close()
         client_socket, client_address = None, None
+        camera_client_host = None
         try_save_pin_states()
         continue
 
@@ -490,6 +505,7 @@ def main_server():
       print_error("Error processing command: {}".format(e))
       client_socket.close()
       client_socket, client_address = None, None
+      camera_client_host = None
 
 
 if __name__ == "__main__":

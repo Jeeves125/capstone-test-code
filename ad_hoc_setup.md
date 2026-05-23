@@ -2,8 +2,8 @@ Do not use an Ad Hoc connection, make the PI a Wi-Fi access point instead.
 
 ## Camera scripts by machine
 
-- `pi_cam_client.py` runs on the Raspberry Pi (Linux only) and sends camera frames.
-- `pi_cam_server.py` runs on your Windows/Linux computer and receives/displays frames.
+- `pi_cam_client.py` runs on the Raspberry Pi (Linux only) and sends camera frames over UDP.
+- `pi_cam_server.py` runs on your Windows/Linux computer and receives/displays UDP camera frames.
 
 ## Install commands
 

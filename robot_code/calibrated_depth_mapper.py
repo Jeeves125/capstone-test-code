@@ -8,13 +8,13 @@ import argparse
 import cv2
 import numpy as np
 import pickle
-import os
+import os, sys
 import json
 import csv
 import time
 
 import pygame
-from stereo_depth import StereoDepthMapper
+
 
 class CalibratedStereoDepthMapper():
     def __init__(self, width=640, height=480, calibration_file='stereo_calibration_refined'):
@@ -96,21 +96,39 @@ class CalibratedStereoDepthMapper():
         self.temporal_median_enabled = False
         self.temporal_median_buffer = []
         self.temporal_median_size = 5
+        self.temporal_smoothing_enabled = False
+        self.temporal_smoothing_alpha = 0.2
+        
+        self.last_grey_left = None
+        self.last_grey_right = None
         
         # Prefer full stereo calibration (rectification maps) if available
         stereo_file = f"{calibration_file}.pkl"
-        if os.path.exists(stereo_file):
+        
+        _main = sys.modules.get('__main__')
+        if _main and getattr(_main, '__file__', None):
+            __script_path = os.path.abspath(_main.__file__)
+        elif sys.argv and sys.argv[0]:
+            __script_path = os.path.abspath(sys.argv[0])
+        else:
+            __script_path = os.path.abspath(__file__)
+        __script_dir = os.path.dirname(__script_path)
+        
+        absolute_path = os.path.join(__script_dir, stereo_file)
+        if os.path.exists(absolute_path):
             try:
-                with open(stereo_file, 'rb') as f:
+                with open(absolute_path, 'rb') as f:
                     self.stereo_calibration = pickle.load(f)
                 # use maps from stereo calibration
                 self.left_map1 = self.stereo_calibration.get('left_map1')
                 self.left_map2 = self.stereo_calibration.get('left_map2')
                 self.right_map1 = self.stereo_calibration.get('right_map1')
                 self.right_map2 = self.stereo_calibration.get('right_map2')
-                print('Loaded stereo calibration and rectification maps from', stereo_file)
+                print('Loaded stereo calibration and rectification maps from', absolute_path)
             except Exception as e:
                 print('Failed to load stereo calibration:', e)
+        else:
+            print("Calib dont exist")
     
     def load_calibration(self, camera_id):
         """Load calibration data for a camera."""
@@ -359,11 +377,14 @@ class CalibratedStereoDepthMapper():
                 stack = np.stack(self.temporal_median_buffer, axis=2)
                 disparity_normalized = np.median(stack, axis=2).astype(np.uint8)
         else:
-            if self.temporal_depth is None:
-                self.temporal_depth = disparity_normalized.astype(np.float32)
+            if self.temporal_smoothing_enabled:
+                if self.temporal_depth is None:
+                    self.temporal_depth = disparity_normalized.astype(np.float32)
+                else:
+                    cv2.accumulateWeighted(disparity_normalized, self.temporal_depth, self.temporal_smoothing_alpha)
+                disparity_normalized = cv2.convertScaleAbs(self.temporal_depth)
             else:
-                cv2.accumulateWeighted(disparity_normalized, self.temporal_depth, 0.2)
-            disparity_normalized = cv2.convertScaleAbs(self.temporal_depth)
+                self.temporal_depth = None
 
         return disp_left, disparity_normalized
 
@@ -419,7 +440,7 @@ class CalibratedStereoDepthMapper():
         colored = cv2.applyColorMap(disp8, cv2.COLORMAP_JET)
         return colored
 
-    def auto_tune_on_frame(self, left_gray, right_gray, try_block_sizes=(5,7,9), try_num_disparities=(16*6,16*8,16*10)):
+    def auto_tune_on_frame(self, try_block_sizes=(5,7,9), try_num_disparities=(16*6,16*8,16*10)):
         """Quick automatic tuning of StereoSGBM on a single frame.
 
         Tries combinations of `numDisparities` and `blockSize` and picks the
@@ -464,7 +485,7 @@ class CalibratedStereoDepthMapper():
                     preFilterCap=63,
                     mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
                 )
-                disp = stereo_tmp.compute(left_gray, right_gray).astype(np.float32) / 16.0
+                disp = stereo_tmp.compute(self.last_grey_left, self.last_grey_right).astype(np.float32) / 16.0
                 min_disp = float(stereo_tmp.getMinDisparity())
                 valid = disp > min_disp
                 if not np.any(valid):
@@ -531,7 +552,7 @@ class CalibratedStereoDepthMapper():
             print("Auto-tune: no valid configuration found on this frame")
             return False
 
-    def auto_tune_full(self, left_gray, right_gray):
+    def auto_tune_full(self):
         """Run an expanded auto-tune grid and save full CSV report.
 
         This explores numDisparities from 16*4 to 16*20 and blockSizes 3..13 odd.
@@ -539,19 +560,19 @@ class CalibratedStereoDepthMapper():
         num_list = tuple(range(16*4, 16*20 + 1, 16))
         blocks = tuple([3,5,7,9,11,13])
         print(f"Running full auto-tune: numDisparities={num_list}, blockSizes={blocks}")
-        ok = self.auto_tune_on_frame(left_gray, right_gray, try_block_sizes=blocks, try_num_disparities=num_list)
+        ok = self.auto_tune_on_frame(try_block_sizes=blocks, try_num_disparities=num_list)
         if ok:
             print(f"Full auto-tune complete. CSV: {getattr(self, 'last_auto_tune_log', 'unknown')}" )
         else:
             print(f"Full auto-tune finished with no valid config. CSV (partial): {getattr(self, 'last_auto_tune_log', 'unknown')}" )
         return ok
 
-    def auto_tune_roi(self, left_gray, right_gray, size_frac=0.5, **kwargs):
+    def auto_tune_roi(self, size_frac=0.5, **kwargs):
         """ROI-focused auto-tune: center-crop the input frames and run auto_tune_on_frame.
 
         If tuning succeeds, store the ROI as `self.roi` so future matching uses it.
         """
-        h, w = left_gray.shape[:2]
+        h, w = self.last_grey_left.shape[:2]
         sw = int(w * size_frac)
         sh = int(h * size_frac)
         cx = w // 2
@@ -560,8 +581,8 @@ class CalibratedStereoDepthMapper():
         y0 = max(0, cy - sh // 2)
         x1 = min(w, x0 + sw)
         y1 = min(h, y0 + sh)
-        lg = left_gray[y0:y1, x0:x1]
-        rg = right_gray[y0:y1, x0:x1]
+        lg = self.last_grey_left[y0:y1, x0:x1]
+        rg = self.last_grey_right[y0:y1, x0:x1]
         print(f"Auto-tune ROI: ({x0},{y0}) - ({x1},{y1}) size {sw}x{sh}")
         ok = self.auto_tune_on_frame(lg, rg, **kwargs)
         if ok:
@@ -636,13 +657,13 @@ class CalibratedStereoDepthMapper():
         return depth_bgr
 
     def run(self, left_frame, right_frame, final_scale_factor=1.0):
-        frame_count = 0
-        diagnostics = self.diagnostics_enabled
-
         if left_frame is None or right_frame is None:
             print("Error reading frames. Got NONE")
+            return None, None
 
         left_gray, right_gray = self.preprocess_frames(left_frame, right_frame)
+        self.last_grey_left = left_gray
+        self.last_grey_right = right_gray
 
         # Compute depth (returns raw 16S left disparity and display normalized)
         disp16, disp_display = self.compute_depth(left_gray, right_gray)
@@ -667,7 +688,13 @@ class CalibratedStereoDepthMapper():
             depth_color = self.apply_colormap(disp_display)
 
         # Resize for display
-        depth_display = cv2.resize(depth_color.tobytes(), (depth_color.shape[1] * final_scale_factor, depth_color.shape[0] * final_scale_factor), interpolation=cv2.INTER_NEAREST)
+        resized_width = max(1, int(depth_color.shape[1] * final_scale_factor))
+        resized_height = max(1, int(depth_color.shape[0] * final_scale_factor))
+        depth_display = cv2.resize(
+            depth_color,
+            (resized_width, resized_height),
+            interpolation=cv2.INTER_NEAREST,
+        )
         
         surface = pygame.image.frombuffer(depth_display.tobytes(), depth_display.shape[1::-1], 'BGR')
         surface = surface.convert()
